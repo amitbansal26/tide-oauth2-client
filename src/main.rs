@@ -1,5 +1,9 @@
+mod config;
+use crate::config::Config;
+
 use actix_session::{CookieSession, Session};
 use actix_web::http::header;
+use actix_web::middleware::Logger;
 use actix_web::web;
 use actix_web::{App, HttpResponse, HttpServer};
 use oauth2::basic::BasicClient;
@@ -7,7 +11,12 @@ use oauth2::{
     AuthUrl, AuthorizationCode, ClientId, ClientSecret, CsrfToken, PkceCodeChallenge, RedirectUrl,
     Scope, TokenUrl,
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
+use tracing::{info, instrument};
+use tracing_futures::Instrument;
+use tracing_subscriber::EnvFilter;
+
+#[derive(Debug)]
 struct AppState {
     oauth: BasicClient,
 }
@@ -34,6 +43,8 @@ fn index(session: Session) -> HttpResponse {
 
 #[actix_rt::main]
 async fn main() {
+    let config = Config::from_env().expect("Server configuration");
+    info!("Loading Configuration");
     HttpServer::new(|| {
         let keycloak_client_id = ClientId::new(String::from("rust-microservice"));
         let google_client_secret =
@@ -58,6 +69,7 @@ async fn main() {
         App::new()
             .data(AppState { oauth: client })
             .wrap(CookieSession::signed(&[0; 32]).secure(false))
+            .wrap(Logger::default())
             .route("/", web::get().to(index))
             .route("/login", web::get().to(login))
             .route("/logout", web::get().to(logout))
@@ -76,9 +88,10 @@ fn login(data: web::Data<AppState>) -> HttpResponse {
     let (authorize_url, _csrf_state) = &data
         .oauth
         .authorize_url(CsrfToken::new_random)
+        .add_scope(Scope::new("rustscope".to_string()))
         .set_pkce_challenge(pkce_code_challange)
         .url();
-
+    info!("Auth url {}", authorize_url);
     HttpResponse::Found()
         .header(header::LOCATION, authorize_url.to_string())
         .finish()
@@ -89,12 +102,13 @@ fn logout(session: Session) -> HttpResponse {
         .header(header::LOCATION, "/".to_string())
         .finish()
 }
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize, Debug)]
 pub struct AuthRequest {
     code: String,
     state: String,
     scope: String,
 }
+
 fn auth(
     session: Session,
     data: web::Data<AppState>,
@@ -102,11 +116,10 @@ fn auth(
 ) -> HttpResponse {
     let code = AuthorizationCode::new(params.code.clone());
     let state = CsrfToken::new(params.state.clone());
-    let _scope = params.scope.clone();
+    let scope = params.scope.clone();
 
     // Exchange the code with a token.
     let token = &data.oauth.exchange_code(code);
-    println!("Access Token {:?}", token);
     session.set("login", true).unwrap();
 
     let html = format!(
@@ -120,7 +133,8 @@ fn auth(
         </body>
     </html>"#,
         state.secret(),
-        token
+        token,
     );
+
     HttpResponse::Ok().body(html)
 }
